@@ -84,6 +84,11 @@ namespace Gosub.DlMalloc
 
         }
 
+        protected virtual void CallDisposeFinal(bool disposing)
+        {
+            CallDisposeFinal();
+        }
+
         /// <summary>
         /// Called when the heap is known to be corrupted.  Throws an exception
         /// and calls ResetOnError by default.
@@ -1005,6 +1010,10 @@ namespace Gosub.DlMalloc
             p->head = s | PINUSE_BIT | CINUSE_BIT;
         }
 
+        protected virtual size_t Granularity => DEFAULT_GRANULARITY;
+
+        protected virtual size_t PageSize => (uint)Environment.SystemPageSize;
+
         // ---------------------------- setting mparams --------------------------
 
         // Initialize mparams
@@ -1015,8 +1024,9 @@ namespace Gosub.DlMalloc
             // ints must be at least 4 bytes.
             // alignment must be at least 8.
             // Alignment, min chunk size, and page size must all be powers of 2.
-            size_t psize = (uint)Environment.SystemPageSize;
-            size_t gsize = DEFAULT_GRANULARITY != 0 ? DEFAULT_GRANULARITY : psize; // dwAllocationGranularity
+            size_t psize = PageSize;
+            size_t granularity = Granularity;
+            size_t gsize = granularity != 0 ? granularity : psize; // dwAllocationGranularity
             if ((sizeof(size_t) < sizeof(byte*))
                 || (MAX_SIZE_T < MIN_CHUNK_SIZE)
                 || (sizeof(int) < 4)
@@ -2294,6 +2304,10 @@ namespace Gosub.DlMalloc
             smallbins = (mchunk**)Marshal.AllocHGlobal(sizeof(mchunk*) * ((int)((NSMALLBINS + 1) * 2)));
             treebins = (tchunk**)Marshal.AllocHGlobal(sizeof(tchunk*) * ((int)NTREEBINS));
             seg = (msegment*)Marshal.AllocHGlobal(sizeof(msegment));
+            GC.AddMemoryPressure(
+                sizeof(mchunk*) * ((int)((NSMALLBINS + 1) * 2)) +
+                sizeof(tchunk*) * ((int)NTREEBINS) +
+                sizeof(msegment));
             MemClear(smallbins, sizeof(mchunk*) * ((int)((NSMALLBINS + 1) * 2)));
             MemClear(treebins, sizeof(tchunk*) * ((int)NTREEBINS));
             MemClear(seg, sizeof(msegment));
@@ -2337,33 +2351,54 @@ namespace Gosub.DlMalloc
             }
         }
 
+        ~DlMallocBase()
+        {
+            Dispose(false);
+        }
+
+        public bool IsDisposed { get; private set; }
+
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
         //  destroy_mspace destroys the given space, and attempts to return all
         //  of its memory back to the system, returning the total number of
         //  bytes freed. After destruction, the results of access to all memory
         //  used by the space become undefined.
-        public void Dispose()
+        protected virtual void Dispose(bool disposing)
         {
-            msegment* sp = seg;
-            while (sp != null)
+            if (!IsDisposed)
             {
-                byte* baseAddr = sp->baseAddr;
-                size_t size = sp->size;
-                flag_t flag = sp->sflags;
-                sp = sp->next;
-                if ((flag & flag_t.USE_MMAP_BIT) != 0 && (flag & flag_t.EXTERN_BIT) == 0 &&
-                    CallReleaseCore(baseAddr, size))
+                IsDisposed = true;
+                msegment* sp = seg;
+                while (sp != null)
                 {
-                    //freed += size;
+                    byte* baseAddr = sp->baseAddr;
+                    size_t size = sp->size;
+                    flag_t flag = sp->sflags;
+                    sp = sp->next;
+                    if ((flag & flag_t.USE_MMAP_BIT) != 0 && (flag & flag_t.EXTERN_BIT) == 0 &&
+                        CallReleaseCore(baseAddr, size))
+                    {
+                        //freed += size;
+                    }
                 }
+                Marshal.FreeHGlobal((IntPtr)smallbins);
+                Marshal.FreeHGlobal((IntPtr)treebins);
+                Marshal.FreeHGlobal((IntPtr)seg);
+                GC.RemoveMemoryPressure(
+                    sizeof(mchunk*) * ((int)((NSMALLBINS + 1) * 2)) +
+                    sizeof(tchunk*) * ((int)NTREEBINS) +
+                    sizeof(msegment));
+                smallbins = null;
+                treebins = null;
+                seg = null;
+                top = null;
+                CallDisposeFinal(disposing);
             }
-            Marshal.FreeHGlobal((IntPtr)smallbins);
-            Marshal.FreeHGlobal((IntPtr)treebins);
-            Marshal.FreeHGlobal((IntPtr)seg);
-            smallbins = null;
-            treebins = null;
-            seg = null;
-            top = null;
-            CallDisposeFinal();
         }
 
         /// <summary>
